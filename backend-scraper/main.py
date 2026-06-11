@@ -13,7 +13,10 @@ Endpoints:
 """
 
 import os
+import json
 import re
+import threading
+import time
 import unicodedata
 import urllib.parse
 from datetime import date, datetime, timedelta
@@ -21,6 +24,7 @@ from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 import requests
+import redis
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel
@@ -33,6 +37,72 @@ from textblob import TextBlob
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
 TMDB_READ_ACCESS_TOKEN = os.environ.get("TMDB_READ_ACCESS_TOKEN", "")
 MADRID_TZ = ZoneInfo("Europe/Madrid")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+FA_REQUEST_INTERVAL_SECONDS = 2.0
+FA_DIRECTORY_TTL_SECONDS = 86400
+FA_THEATER_TTL_SECONDS = 43200
+FA_STALE_TTL_SECONDS = 172800
+TMDB_CATALOG_TTL_SECONDS = 21600
+TMDB_DETAIL_TTL_SECONDS = 86400
+TMDB_REVIEWS_TTL_SECONDS = 86400
+TMDB_STALE_TTL_SECONDS = 604800
+_fa_request_lock = threading.Lock()
+_fa_last_request_at = 0.0
+
+try:
+    redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    redis_client.ping()
+except Exception as exc:
+    print(f"[Scraper] Redis no disponible; caché ética solo en memoria: {exc}")
+    redis_client = None
+
+_memory_cache = {}
+
+
+def _cache_get(key: str):
+    if redis_client:
+        try:
+            value = redis_client.get(key)
+            return json.loads(value) if value else None
+        except Exception as exc:
+            print(f"[Scraper] Error leyendo caché {key}: {exc}")
+    cached = _memory_cache.get(key)
+    if cached and cached["expires_at"] > time.time():
+        return cached["value"]
+    return None
+
+
+def _cache_set(key: str, value, ttl: int):
+    if redis_client:
+        try:
+            redis_client.setex(key, ttl, json.dumps(value))
+            return
+        except Exception as exc:
+            print(f"[Scraper] Error guardando caché {key}: {exc}")
+    _memory_cache[key] = {"value": value, "expires_at": time.time() + ttl}
+
+
+def _tmdb_cache_get(cache_key: str):
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        print(f"[TMDB] Cache HIT: {cache_key}")
+        return cached
+    print(f"[TMDB] Cache MISS: {cache_key}")
+    return None
+
+
+def _tmdb_cache_store(cache_key: str, value, ttl: int):
+    _cache_set(cache_key, value, ttl)
+    _cache_set(f"{cache_key}:stale", value, TMDB_STALE_TTL_SECONDS)
+    print(f"[TMDB] Cache STORE: {cache_key}")
+
+
+def _tmdb_stale_or(cache_key: str, fallback):
+    stale = _cache_get(f"{cache_key}:stale")
+    if stale is not None:
+        print(f"[TMDB] Using stale cache: {cache_key}")
+        return stale
+    return fallback
 
 # ---------------------------------------------------------------------------
 # Mapeo de Géneros de TMDB
@@ -202,6 +272,11 @@ def _fetch_trending_movies(pages: int = 5) -> List[dict]:
         print("[Scraper] Sin credenciales TMDB — devolviendo catálogo de respaldo.")
         return FALLBACK_MOVIES
 
+    cache_key = f"tmdb:catalog:v1:movie:popular:es-ES:{pages}"
+    cached = _tmdb_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     movies: list = []
     titles_seen: set = set()
     headers, base_params = _tmdb_auth()
@@ -245,10 +320,11 @@ def _fetch_trending_movies(pages: int = 5) -> List[dict]:
 
     if len(movies) >= 5:
         print(f"[Scraper] {len(movies)} películas obtenidas de TMDB.")
+        _tmdb_cache_store(cache_key, movies, TMDB_CATALOG_TTL_SECONDS)
         return movies
 
-    print("[Scraper] Pocos resultados — usando catálogo de respaldo.")
-    return FALLBACK_MOVIES
+    print("[Scraper] Pocos resultados — usando caché anterior o catálogo de respaldo.")
+    return _tmdb_stale_or(cache_key, FALLBACK_MOVIES)
 
 
 def _fetch_upcoming_movies() -> List[dict]:
@@ -256,6 +332,11 @@ def _fetch_upcoming_movies() -> List[dict]:
     if not _has_credentials():
         print("[Scraper] Sin credenciales TMDB — devolviendo catálogo de respaldo.")
         return FALLBACK_MOVIES
+
+    cache_key = "tmdb:catalog:v1:movie:upcoming-combined:es-ES:1"
+    cached = _tmdb_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     movies: list = []
     titles_seen: set = set()
@@ -301,15 +382,42 @@ def _fetch_upcoming_movies() -> List[dict]:
 
     if len(movies) >= 5:
         print(f"[Scraper] {len(movies)} películas en cartelera/próximas obtenidas de TMDB.")
+        _tmdb_cache_store(cache_key, movies, TMDB_CATALOG_TTL_SECONDS)
         return movies
 
-    print("[Scraper] Pocos resultados para estrenos — usando catálogo de respaldo.")
-    return FALLBACK_MOVIES
+    print("[Scraper] Pocos resultados para estrenos — usando caché anterior o respaldo.")
+    return _tmdb_stale_or(cache_key, FALLBACK_MOVIES)
+
+
+def _fetch_tmdb_movie_detail(movie_id: int, headers: dict, base_params: dict) -> dict:
+    cache_key = f"tmdb:detail:v1:movie:{movie_id}:es-ES"
+    cached = _tmdb_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        response = requests.get(
+            f"https://api.themoviedb.org/3/movie/{movie_id}",
+            params={**base_params, "language": "es-ES"},
+            headers=headers,
+            timeout=8,
+        )
+        response.raise_for_status()
+        detail = response.json()
+        _tmdb_cache_store(cache_key, detail, TMDB_DETAIL_TTL_SECONDS)
+        return detail
+    except Exception:
+        return _tmdb_stale_or(cache_key, {})
 
 
 def _fetch_cinema_category(category: str, pages: int = 2) -> List[dict]:
     if not _has_credentials():
         return []
+
+    cache_key = f"tmdb:cinema:v1:{category}:ES:es-ES:{pages}"
+    cached = _tmdb_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     headers, base_params = _tmdb_auth()
     movies: list = []
@@ -321,26 +429,25 @@ def _fetch_cinema_category(category: str, pages: int = 2) -> List[dict]:
             "region": "ES",
             "page": page,
         }
-        response = requests.get(
-            f"https://api.themoviedb.org/3/movie/{category}",
-            params=params,
-            headers=headers,
-            timeout=10,
-        )
-        response.raise_for_status()
+        try:
+            response = requests.get(
+                f"https://api.themoviedb.org/3/movie/{category}",
+                params=params,
+                headers=headers,
+                timeout=10,
+            )
+            response.raise_for_status()
+        except Exception:
+            stale = _tmdb_stale_or(cache_key, None)
+            if stale is not None:
+                return stale
+            raise
         for item in response.json().get("results", []):
             movie_id = item.get("id")
             if not movie_id or movie_id in seen:
                 continue
             seen.add(movie_id)
-            detail_params = {**base_params, "language": "es-ES"}
-            detail = requests.get(
-                f"https://api.themoviedb.org/3/movie/{movie_id}",
-                params=detail_params,
-                headers=headers,
-                timeout=8,
-            )
-            detail_data = detail.json() if detail.status_code == 200 else {}
+            detail_data = _fetch_tmdb_movie_detail(movie_id, headers, base_params)
             genre_ids = item.get("genre_ids", [])
             poster_path = item.get("poster_path")
             backdrop_path = item.get("backdrop_path")
@@ -356,7 +463,10 @@ def _fetch_cinema_category(category: str, pages: int = 2) -> List[dict]:
                 "fecha_estreno": item.get("release_date"),
                 "duracion": detail_data.get("runtime"),
             })
-    return movies
+    if movies:
+        _tmdb_cache_store(cache_key, movies, TMDB_CATALOG_TTL_SECONDS)
+        return movies
+    return _tmdb_stale_or(cache_key, [])
 
 
 def _normalize(value: str) -> str:
@@ -386,35 +496,62 @@ class ShowtimeRequest(BaseModel):
 
 
 def _film_affinity_soup(url: str) -> BeautifulSoup:
-    response = requests.get(
-        url,
-        headers={
-            "User-Agent": "CineVerse university project/1.0",
-            "Accept-Language": "es-ES,es;q=0.9",
-        },
-        timeout=12,
-    )
+    global _fa_last_request_at
+    with _fa_request_lock:
+        elapsed = time.monotonic() - _fa_last_request_at
+        if elapsed < FA_REQUEST_INTERVAL_SECONDS:
+            time.sleep(FA_REQUEST_INTERVAL_SECONDS - elapsed)
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": "CineVerse university project/1.0",
+                "Accept-Language": "es-ES,es;q=0.9",
+            },
+            timeout=12,
+        )
+        _fa_last_request_at = time.monotonic()
     response.raise_for_status()
     return BeautifulSoup(response.text, "lxml")
 
 
 def _resolve_fa_cinemas(province_code: str, cinema_names: List[str]) -> dict:
-    soup = _film_affinity_soup(
-        f"https://www.filmaffinity.com/es/theaters.php?state={province_code}"
-    )
-    candidates = []
-    for link in soup.select('a[href*="theater-showtimes.php?id="]'):
-        name = link.get_text(" ", strip=True)
-        href = urllib.parse.urljoin("https://www.filmaffinity.com", link.get("href"))
-        if name and href:
-            candidates.append((name, href))
+    cache_key = f"fa:directory:v1:{province_code}"
+    stale_key = f"{cache_key}:stale"
+    candidates = _cache_get(cache_key)
+    if candidates is not None:
+        print(f"[FilmAffinity] Directory cache HIT: {province_code}")
+    if candidates is None:
+        try:
+            print(f"[FilmAffinity] Directory cache MISS: {province_code}")
+            soup = _film_affinity_soup(
+                f"https://www.filmaffinity.com/es/theaters.php?state={province_code}"
+            )
+            candidates = []
+            seen_urls = set()
+            for link in soup.select('a[href*="theater-showtimes.php?id="]'):
+                name = link.get_text(" ", strip=True)
+                href = urllib.parse.urljoin("https://www.filmaffinity.com", link.get("href"))
+                if name and href and href not in seen_urls:
+                    candidates.append({"name": name, "url": href})
+                    seen_urls.add(href)
+            _cache_set(cache_key, candidates, FA_DIRECTORY_TTL_SECONDS)
+            _cache_set(stale_key, candidates, FA_STALE_TTL_SECONDS)
+        except Exception:
+            candidates = _cache_get(stale_key)
+            if candidates is None:
+                raise
+            print(f"[FilmAffinity] Using stale directory cache: {province_code}")
 
     resolved = {}
     for requested_name in cinema_names:
         scores = sorted(
             (
-                (fuzz.token_set_ratio(_normalize(requested_name), _normalize(name)), name, url)
-                for name, url in candidates
+                (
+                    fuzz.token_set_ratio(_normalize(requested_name), _normalize(candidate["name"])),
+                    candidate["name"],
+                    candidate["url"],
+                )
+                for candidate in candidates
             ),
             reverse=True,
         )
@@ -428,15 +565,10 @@ def _resolve_fa_cinemas(province_code: str, cinema_names: List[str]) -> dict:
     return resolved
 
 
-def _movie_matches(card, movie: ShowtimeMovie) -> bool:
-    title_node = card.select_one(".mc-title a, .movie-card .mc-title a")
-    display_node = card.select_one(".mv-title")
-    title = title_node.get_text(" ", strip=True) if title_node else ""
-    display_title = display_node.get_text(" ", strip=True) if display_node else ""
-    candidate = title or display_title
+def _movie_matches(candidate: dict, movie: ShowtimeMovie) -> bool:
     requested = [movie.titulo, movie.titulo_original or ""]
     title_score = max(
-        fuzz.token_set_ratio(_normalize(candidate), _normalize(value))
+        fuzz.token_set_ratio(_normalize(candidate.get("titulo", "")), _normalize(value))
         for value in requested if value
     )
     if title_score < 88:
@@ -445,42 +577,39 @@ def _movie_matches(card, movie: ShowtimeMovie) -> bool:
         return True
 
     release_year = (movie.fecha_estreno or "")[:4]
-    year_node = card.select_one(".mc-year")
-    card_year = year_node.get_text(" ", strip=True) if year_node else ""
+    card_year = candidate.get("anio") or ""
     if release_year and card_year and release_year != card_year:
         return False
 
-    runtime_node = card.select_one(".runtime")
-    runtime_match = re.search(r"(\d+)", runtime_node.get_text(" ", strip=True)) if runtime_node else None
-    if movie.duracion and runtime_match:
-        if abs(movie.duracion - int(runtime_match.group(1))) > 20:
+    runtime = candidate.get("duracion")
+    if movie.duracion and runtime:
+        if abs(movie.duracion - runtime) > 20:
             return False
     return True
 
 
-def _parse_fa_showtimes(url: str, movie: ShowtimeMovie, days: int) -> dict:
-    soup = _film_affinity_soup(url)
-    today = datetime.now(MADRID_TZ).date()
-    last_day = today + timedelta(days=max(1, days) - 1)
-    sessions = []
+def _parse_fa_theater_catalog_from_soup(soup: BeautifulSoup, url: str) -> dict:
+    movies = []
     official_link = soup.select_one(
         'a[href^="http"][title*="web" i], a[href^="http"][class*="official" i]'
     )
-
     for showtimes in soup.select(".movie-showtimes-n"):
         card = showtimes.find_parent(class_=re.compile(r"\bmovie-card\b")) or showtimes.parent
-        if not _movie_matches(card, movie):
-            continue
+        title_node = card.select_one(".mc-title a, .movie-card .mc-title a")
+        display_node = showtimes.select_one(".mv-title > span, .mv-title")
+        title = title_node.get_text(" ", strip=True) if title_node else ""
+        display_title = display_node.get_text(" ", strip=True) if display_node else ""
+        candidate_title = title or display_title
+        year_node = card.select_one(".mc-year")
+        runtime_node = card.select_one(".runtime")
+        runtime_match = re.search(r"(\d+)", runtime_node.get_text(" ", strip=True)) if runtime_node else None
         title_text = showtimes.select_one(".mv-title > span, .mv-title")
         version_match = re.search(r"\(([^()]*)\)\s*$", title_text.get_text(" ", strip=True)) if title_text else None
         version = version_match.group(1) if version_match else "Estándar"
+        sessions = []
         for row in showtimes.select("[data-sess-date]"):
             session_date = row.get("data-sess-date")
-            try:
-                parsed_date = datetime.strptime(session_date, "%Y-%m-%d").date()
-            except (TypeError, ValueError):
-                continue
-            if not today <= parsed_date <= last_day:
+            if not session_date:
                 continue
             for link in row.select(".sess-times a[href]"):
                 hour = link.get_text(" ", strip=True)
@@ -492,9 +621,63 @@ def _parse_fa_showtimes(url: str, movie: ShowtimeMovie, days: int) -> dict:
                         "compra_url": urllib.parse.urljoin(url, link.get("href")),
                         "fuente": "FilmAffinity",
                     })
+        movies.append({
+            "titulo": candidate_title,
+            "anio": year_node.get_text(" ", strip=True) if year_node else None,
+            "duracion": int(runtime_match.group(1)) if runtime_match else None,
+            "version": version,
+            "horarios": sessions,
+        })
+    return {
+        "peliculas": movies,
+        "web_oficial_url": official_link.get("href") if official_link else None,
+        "actualizado_en": datetime.now(MADRID_TZ).isoformat(),
+    }
+
+
+def _get_fa_theater_catalog(url: str) -> dict:
+    theater_id = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("id", ["unknown"])[0]
+    cache_key = f"fa:theater:v2:{theater_id}"
+    stale_key = f"{cache_key}:stale"
+    catalog = _cache_get(cache_key)
+    if catalog is not None:
+        print(f"[FilmAffinity] Theater cache HIT: {theater_id}")
+        return catalog
+    try:
+        print(f"[FilmAffinity] Theater cache MISS: {theater_id}")
+        catalog = _parse_fa_theater_catalog_from_soup(_film_affinity_soup(url), url)
+        _cache_set(cache_key, catalog, FA_THEATER_TTL_SECONDS)
+        _cache_set(stale_key, catalog, FA_STALE_TTL_SECONDS)
+        return catalog
+    except Exception:
+        stale = _cache_get(stale_key)
+        if stale is not None:
+            stale["stale"] = True
+            print(f"[FilmAffinity] Using stale theater cache: {theater_id}")
+            return stale
+        raise
+
+
+def _parse_fa_showtimes(url: str, movie: ShowtimeMovie, days: int) -> dict:
+    catalog = _get_fa_theater_catalog(url)
+    today = datetime.now(MADRID_TZ).date()
+    last_day = today + timedelta(days=max(1, days) - 1)
+    sessions = []
+    for candidate in catalog.get("peliculas", []):
+        if not _movie_matches(candidate, movie):
+            continue
+        for session in candidate.get("horarios", []):
+            try:
+                parsed_date = datetime.strptime(session["fecha"], "%Y-%m-%d").date()
+            except (KeyError, TypeError, ValueError):
+                continue
+            if today <= parsed_date <= last_day:
+                sessions.append(session)
     return {
         "horarios": sessions,
-        "web_oficial_url": official_link.get("href") if official_link else None,
+        "web_oficial_url": catalog.get("web_oficial_url"),
+        "actualizado_en": catalog.get("actualizado_en"),
+        "stale": catalog.get("stale", False),
     }
 
 
@@ -502,6 +685,11 @@ def _fetch_tmdb_reviews(tmdb_id: int, media_type: str = "movie") -> List[dict]:
     """Obtiene hasta 3 críticas reales de TMDB + análisis NLP de sentimiento."""
     if not _has_credentials():
         return []
+
+    cache_key = f"tmdb:reviews:v1:{media_type}:{tmdb_id}:en-US"
+    cached = _tmdb_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     headers, base_params = _tmdb_auth()
     params = {**base_params, "language": "en-US"}
@@ -514,7 +702,7 @@ def _fetch_tmdb_reviews(tmdb_id: int, media_type: str = "movie") -> List[dict]:
             timeout=5,
         )
         if resp.status_code != 200:
-            return []
+            return _tmdb_stale_or(cache_key, [])
 
         criticas = []
         for item in resp.json().get("results", [])[:3]:
@@ -533,10 +721,11 @@ def _fetch_tmdb_reviews(tmdb_id: int, media_type: str = "movie") -> List[dict]:
                     "polaridad": round(polarity, 4),
                 }
             )
+        _tmdb_cache_store(cache_key, criticas, TMDB_REVIEWS_TTL_SECONDS)
         return criticas
     except Exception as e:
         print(f"[Scraper] Error al obtener críticas TMDB para {tmdb_id}: {e}")
-        return []
+        return _tmdb_stale_or(cache_key, [])
 
 
 def _scrape_news(titulo: str) -> List[dict]:
@@ -681,6 +870,7 @@ def scrape_showtimes(payload: ShowtimeRequest):
         raise HTTPException(status_code=502, detail=f"FilmAffinity no disponible: {exc}")
 
     results = []
+    catalog_timestamps = []
     for cinema in payload.cinemas:
         match = resolved.get(cinema.nombre)
         if not match:
@@ -699,6 +889,8 @@ def scrape_showtimes(payload: ShowtimeRequest):
                 payload.days,
             )
             sessions = parsed["horarios"]
+            if parsed.get("actualizado_en"):
+                catalog_timestamps.append(parsed["actualizado_en"])
             results.append({
                 "nombre": cinema.nombre,
                 "horarios": sessions,
@@ -717,7 +909,7 @@ def scrape_showtimes(payload: ShowtimeRequest):
             })
     return {
         "cinemas": results,
-        "updated_at": datetime.now(MADRID_TZ).isoformat(),
+        "updated_at": min(catalog_timestamps) if catalog_timestamps else datetime.now(MADRID_TZ).isoformat(),
     }
 
 
@@ -731,6 +923,11 @@ def _fetch_tmdb_catalog(media_type: str, category: str, pages: int = 2) -> List[
         if media_type == "tv":
             return FALLBACK_TV
         return FALLBACK_MOVIES
+
+    cache_key = f"tmdb:catalog:v1:{media_type}:{category}:es-ES:{pages}"
+    cached = _tmdb_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     items_list: list = []
     titles_seen: set = set()
@@ -771,7 +968,11 @@ def _fetch_tmdb_catalog(media_type: str, category: str, pages: int = 2) -> List[
         except Exception as e:
             print(f"[Scraper] Error al obtener de {media_type}/{category} página {page}: {e}")
 
-    return items_list
+    if items_list:
+        _tmdb_cache_store(cache_key, items_list, TMDB_CATALOG_TTL_SECONDS)
+        return items_list
+    fallback = FALLBACK_TV if media_type == "tv" else FALLBACK_MOVIES
+    return _tmdb_stale_or(cache_key, fallback)
 
 
 @app.get("/scrape/tv/popular")

@@ -5,3 +5,4 @@ beautifulsoup4>=4.12.3
 lxml>=5.2.0
 textblob>=0.18.0
 rapidfuzz>=3.9.0
+redis>=5.0.0

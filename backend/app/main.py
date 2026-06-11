@@ -3321,6 +3321,133 @@ def reverse_geocode_province(lat: float, lon: float) -> str:
         pass
     return province_code
 
+def get_cached_nearby_cinemas(lat: float, lon: float) -> List[dict]:
+    import requests
+
+    zone = f"{round(lat, 2)}:{round(lon, 2)}"
+    cache_key = f"geo:cinemas:v1:{zone}"
+    stale_key = f"{cache_key}:stale"
+
+    def read_cache(key: str) -> Optional[List[dict]]:
+        try:
+            value = redis_client.get(key)
+            return json.loads(value) if value else None
+        except Exception as exc:
+            print(f"[REDIS] Error leyendo {key}: {exc}")
+            return None
+
+    def with_distances(cinemas: List[dict]) -> List[dict]:
+        return [
+            {
+                **cinema,
+                "distancia": haversine_distance(
+                    lat, lon, cinema["lat"], cinema["lon"]
+                ),
+            }
+            for cinema in cinemas
+        ]
+
+    cached = read_cache(cache_key)
+    if cached is not None:
+        print(f"[OVERPASS] Cache HIT para zona {zone}")
+        return with_distances(cached)
+
+    lock = None
+    try:
+        lock = redis_client.lock(
+            f"{cache_key}:lock",
+            timeout=90,
+            blocking_timeout=65,
+        )
+        acquired = lock.acquire(blocking=True)
+    except Exception as exc:
+        print(f"[REDIS] No se pudo crear el bloqueo de Overpass: {exc}")
+        acquired = False
+
+    try:
+        if acquired:
+            cached = read_cache(cache_key)
+            if cached is not None:
+                print(f"[OVERPASS] Cache HIT tras espera para zona {zone}")
+                return with_distances(cached)
+
+        overpass_query = f"""
+            [out:json][timeout:12];
+            (
+              nwr["amenity"="cinema"](around:20000, {lat}, {lon});
+            );
+            out center;
+        """
+        overpass_urls = [
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter",
+        ]
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "CineVerse university project/1.0",
+        }
+        last_error = None
+        cinemas = []
+        for overpass_url in overpass_urls:
+            try:
+                response = requests.get(
+                    overpass_url,
+                    params={"data": overpass_query},
+                    headers=headers,
+                    timeout=18,
+                )
+                response.raise_for_status()
+                for elem in response.json().get("elements", []):
+                    name = elem.get("tags", {}).get("name")
+                    c_lat = elem.get("lat") or elem.get("center", {}).get("lat")
+                    c_lon = elem.get("lon") or elem.get("center", {}).get("lon")
+                    if name and c_lat is not None and c_lon is not None:
+                        cinemas.append({
+                            "nombre": name,
+                            "lat": float(c_lat),
+                            "lon": float(c_lon),
+                        })
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                print(f"Error querying Overpass API ({overpass_url}): {exc}")
+
+        if last_error is not None:
+            stale = read_cache(stale_key)
+            if stale is not None:
+                print(f"[OVERPASS] Usando caché de respaldo para zona {zone}")
+                return with_distances(stale)
+            raise HTTPException(
+                status_code=502,
+                detail="El servicio de mapas no está disponible temporalmente. Inténtalo de nuevo."
+            )
+
+        unique = {}
+        for cinema in cinemas:
+            normalized_name = " ".join(cinema["nombre"].lower().split())
+            current = unique.get(normalized_name)
+            distance = haversine_distance(lat, lon, cinema["lat"], cinema["lon"])
+            if current is None or distance < current["distance"]:
+                unique[normalized_name] = {"cinema": cinema, "distance": distance}
+        cinema_data = [item["cinema"] for item in unique.values()]
+
+        try:
+            serialized = json.dumps(cinema_data)
+            redis_client.setex(cache_key, 86400, serialized)
+            redis_client.setex(stale_key, 604800, serialized)
+            print(f"[OVERPASS] Cache STORE para zona {zone}")
+        except Exception as exc:
+            print(f"[REDIS] Error guardando cines para zona {zone}: {exc}")
+        return with_distances(cinema_data)
+    finally:
+        if acquired and lock:
+            try:
+                lock.release()
+            except Exception:
+                pass
+
 @app.post("/api/cinemas/nearby", response_model=List[CinemaResponse])
 def get_nearby_cinemas(
     req: CinemasNearbyRequest,
@@ -3347,71 +3474,11 @@ def get_nearby_cinemas(
     if not movie.en_cartelera and not movie.proximo_estreno:
         raise HTTPException(status_code=404, detail="SHOWTIMES_NOT_APPLICABLE")
     
-    # 1. Intentar consultar OpenStreetMap Overpass API
-    cinemas_found = []
-    overpass_error = None
-    import requests
-    overpass_query = f"""
-        [out:json][timeout:15];
-        (
-          node["amenity"="cinema"](around:20000, {lat}, {lon});
-          way["amenity"="cinema"](around:20000, {lat}, {lon});
-          relation["amenity"="cinema"](around:20000, {lat}, {lon});
-        );
-        out center;
-    """
-    overpass_urls = [
-        "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.nchc.org.tw/api/interpreter",
-    ]
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "CineVerse/1.0 (nearby-cinemas)"
-    }
-    for overpass_url in overpass_urls:
-        try:
-            response = requests.get(
-                overpass_url,
-                params={"data": overpass_query},
-                headers=headers,
-                timeout=25
-            )
-            response.raise_for_status()
-            data = response.json()
-            elements = data.get("elements", [])
-            for elem in elements:
-                name = elem.get("tags", {}).get("name")
-                if not name:
-                    continue
-                c_lat = elem.get("lat") or elem.get("center", {}).get("lat")
-                c_lon = elem.get("lon") or elem.get("center", {}).get("lon")
-                if c_lat is not None and c_lon is not None:
-                    dist = haversine_distance(lat, lon, c_lat, c_lon)
-                    cinemas_found.append({
-                        "nombre": name,
-                        "lat": c_lat,
-                        "lon": c_lon,
-                        "distancia": dist
-                    })
-            overpass_error = None
-            break
-        except Exception as e:
-            overpass_error = e
-            print(f"Error querying Overpass API ({overpass_url}): {e}")
-
-    if overpass_error is not None:
-        raise HTTPException(
-            status_code=502,
-            detail="El servicio de mapas no está disponible temporalmente. Inténtalo de nuevo."
-        )
-                
-    # Ordenar, deduplicar por nombre y limitar a los cinco más cercanos.
-    unique_cinemas = {}
-    for cinema in sorted(cinemas_found, key=lambda x: x["distancia"]):
-        normalized_name = " ".join(cinema["nombre"].lower().split())
-        unique_cinemas.setdefault(normalized_name, cinema)
-    cinemas_found = list(unique_cinemas.values())[:5]
+    # 1. Obtener cines reales de OpenStreetMap, reutilizando caché geográfica.
+    cinemas_found = sorted(
+        get_cached_nearby_cinemas(lat, lon),
+        key=lambda cinema: cinema["distancia"],
+    )[:5]
     
     if not cinemas_found:
         return []
