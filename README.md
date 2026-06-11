@@ -16,6 +16,7 @@ notificaciones y estadísticas compartidas en una PWA instalable.
 - Historial compartido, puntuaciones y lista de pendientes.
 - Recomendaciones por afinidad basadas en contenido.
 - Cartelera, próximos estrenos y búsqueda de sesiones en cines cercanos.
+- Caché distribuida y respuestas de respaldo para reducir llamadas a servicios externos.
 - Análisis de sentimiento de reseñas y agregación de noticias.
 - CineVerse Wrapped y métricas de visualización en pareja.
 - Exportación de eventos en formato ICS e integración con Google Calendar.
@@ -153,8 +154,14 @@ python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 python -m textblob.download_corpora
+$env:REDIS_URL = "redis://localhost:6379/0"
 uvicorn main:app --reload --port 8001
 ```
+
+Redis permite reutilizar catálogos de TMDB, directorios y sesiones de
+FilmAffinity. Si Redis no está disponible, el scraper utiliza una caché en
+memoria y conserva respuestas anteriores como respaldo temporal frente a fallos
+de los proveedores externos.
 
 ### Frontend
 
