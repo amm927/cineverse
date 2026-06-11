@@ -108,7 +108,7 @@ export default function MoviesMaster({
   const [movies, setMovies] = useState([]);
   const [series, setSeries] = useState([]);
   const [cinemaCatalog, setCinemaCatalog] = useState({ now_playing: [], upcoming: [] });
-  const [aiRecommendations, setAiRecommendations] = useState([]);
+  const [contentRecommendations, setContentRecommendations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -207,11 +207,11 @@ export default function MoviesMaster({
           return res.json();
         })
         .then((recData) => {
-          setAiRecommendations(recData || []);
+          setContentRecommendations(recData || []);
         })
         .catch((err) => console.warn('Error al cargar recomendaciones:', err.message));
     } else {
-      setAiRecommendations([]);
+      setContentRecommendations([]);
     }
   }, [user, fetchUrl]);
 
@@ -237,7 +237,7 @@ export default function MoviesMaster({
       const recUrl = `${API_BASE}/api/recommendations/${user.id}`;
       fetch(recUrl)
         .then((res) => res.json())
-        .then((recData) => setAiRecommendations(recData || []))
+        .then((recData) => setContentRecommendations(recData || []))
         .catch((err) => console.warn('Error al refrescar recomendaciones:', err.message));
     }
 
@@ -431,16 +431,16 @@ export default function MoviesMaster({
               <div className="space-y-10">
                 {activeTab === 'movies' ? (
                   <>
-                    {/* Recomendaciones de IA en primer lugar con un estilo Premium y llamativo */}
-                    {aiRecommendations && aiRecommendations.length > 0 && (
+                    {/* Recomendaciones por afinidad de contenido */}
+                    {contentRecommendations && contentRecommendations.length > 0 && (
                       <div className="p-6 bg-gradient-to-r from-slate-900/60 via-indigo-950/20 to-slate-900/60 rounded-3xl border border-indigo-500/10 shadow-xl shadow-indigo-500/5 relative overflow-hidden group/rec">
                         <div className="absolute -inset-1 bg-gradient-to-r from-cyan-500/5 to-indigo-500/5 blur-xl opacity-70 transition duration-1000 group-hover/rec:opacity-100 pointer-events-none" />
                         <SectionPaginator 
-                          title={user?.tiene_pareja ? "✨ Recomendaciones Especiales para Parejas" : "✨ CineMatch AI Recomendaciones"} 
+                          title={user?.tiene_pareja ? "Recomendaciones para parejas" : "Películas mejor valoradas"}
                           subtitle={user?.tiene_pareja 
-                            ? "Nuestra Inteligencia Artificial analiza sus likes comunes en tiempo real para sugerir su próxima cita ideal" 
-                            : "Nuestra IA analiza tus gustos y valoraciones para sugerirte los mejores títulos personalizados"}
-                          items={aiRecommendations} 
+                            ? "Comparamos los títulos y las sinopsis de vuestros likes comunes para encontrar películas afines"
+                            : "Una selección de las películas con mejor valoración del catálogo"}
+                          items={contentRecommendations}
                           onMovieClick={onMovieClick}
                           onSelectHero={setSelectedHero}
                         />

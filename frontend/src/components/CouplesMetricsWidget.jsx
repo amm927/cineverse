@@ -138,8 +138,8 @@ export default function CouplesMetricsWidget({
         </div>
       </div>
 
-      {/* Grid del Círculo de Compatibilidad y Texto Dinámico */}
-      <div className="flex flex-col sm:flex-row items-center gap-6 mb-6">
+      {/* Compatibilidad y diagnóstico en una composición vertical */}
+      <div className="flex flex-col items-center gap-5 mb-6">
         
         {/* Círculo de Progreso SVG */}
         <div className="relative w-36 h-36 shrink-0 flex items-center justify-center">
@@ -182,17 +182,17 @@ export default function CouplesMetricsWidget({
         </div>
 
         {/* Sección de Texto Dinámico y Calificación */}
-        <div className="flex-1 space-y-3 text-center sm:text-left">
-          <div className="space-y-1">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+        <div className="w-full space-y-3 text-center">
+          <div className="space-y-2">
+            <span className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">
               Diagnóstico actual
             </span>
-            <div className={`px-3.5 py-2 rounded-xl border font-bold text-xs leading-relaxed inline-block ${tagColorClass}`}>
+            <div className={`w-full px-4 py-3 rounded-xl border font-bold text-xs leading-relaxed ${tagColorClass}`}>
               {funLabel}
             </div>
           </div>
 
-          <p className="text-xs text-slate-400 font-light leading-relaxed">
+          <p className="max-w-sm mx-auto text-xs text-slate-400 font-light leading-relaxed">
             {isPaired 
               ? `Habéis coincidido en ${matchesCount} películas. ¡Seguid votando en Tinder para desbloquear más matches!`
               : "Conéctate con tu pareja mediante un código de sala compartido para calcular vuestra compatibilidad real en directo."}
