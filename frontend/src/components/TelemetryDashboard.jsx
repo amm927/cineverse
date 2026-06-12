@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 
-export default function TelemetryDashboard() {
+export default function TelemetryDashboard({ token }) {
   const [telemetry, setTelemetry] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -8,10 +8,13 @@ export default function TelemetryDashboard() {
 
   const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
   const TELEMETRY_URL = `${API_BASE_URL}/api/admin/telemetry`;
+  const authOptions = {
+    headers: { 'Authorization': `Bearer ${token}` }
+  };
 
   const fetchTelemetryData = () => {
     setLoading(true);
-    fetch(TELEMETRY_URL)
+    fetch(TELEMETRY_URL, authOptions)
       .then((res) => {
         if (!res.ok) throw new Error("Error al obtener datos de telemetría SRE.");
         return res.json();
@@ -22,37 +25,9 @@ export default function TelemetryDashboard() {
         setError(null);
       })
       .catch((err) => {
-        console.warn("Error al cargar telemetría. Usando mock RAD...", err.message);
-        // Fallback mock RAD premium en caso de desconexión del backend
-        setTelemetry({
-          total_requests: 1242,
-          error_rate: 0.81,
-          error_count: 10,
-          avg_latency_s: 0.0452,
-          p95_latency_s: 0.0921,
-          max_latency_s: 0.3842,
-          database_pool: {
-            pool_class: "QueuePool",
-            pool_size: 5,
-            checkedout: 1,
-            checkedin: 4,
-            overflow: 0
-          },
-          endpoints: {
-            "GET /api/movies": { count: 843, avg_time: 0.0384 },
-            "GET /api/movies/{id}": { count: 215, avg_time: 0.1242 },
-            "POST /api/decide": { count: 124, avg_time: 0.0152 },
-            "POST /api/join-room": { count: 32, avg_time: 0.0215 },
-            "GET /api/history/{id}": { count: 28, avg_time: 0.0184 }
-          },
-          recent_logs: [
-            { id: 1, timestamp: new Date().toISOString(), path: "/api/movies", method: "GET", status_code: 200, response_time_s: 0.0125, client_ip: "127.0.0.1", error_message: null },
-            { id: 2, timestamp: new Date(Date.now() - 5000).toISOString(), path: "/api/decide", method: "POST", status_code: 200, response_time_s: 0.0184, client_ip: "127.0.0.1", error_message: null },
-            { id: 3, timestamp: new Date(Date.now() - 15000).toISOString(), path: "/api/movies/278", method: "GET", status_code: 200, response_time_s: 0.1142, client_ip: "127.0.0.1", error_message: null },
-            { id: 4, timestamp: new Date(Date.now() - 25000).toISOString(), path: "/api/history/rate", method: "POST", status_code: 400, response_time_s: 0.0084, client_ip: "127.0.0.1", error_message: "La puntuación debe estar entre 1 y 5 estrellas" },
-            { id: 5, timestamp: new Date(Date.now() - 60000).toISOString(), path: "/api/movies/9999", method: "GET", status_code: 404, response_time_s: 0.0052, client_ip: "127.0.0.1", error_message: "Película no encontrada" }
-          ]
-        });
+        console.warn("Error al cargar telemetría:", err.message);
+        setTelemetry(null);
+        setError("No se pudo cargar la telemetría administrativa.");
         setLoading(false);
       });
   };
@@ -66,7 +41,7 @@ export default function TelemetryDashboard() {
     let interval = null;
     if (autoRefresh) {
       interval = setInterval(() => {
-        fetch(TELEMETRY_URL)
+        fetch(TELEMETRY_URL, authOptions)
           .then((res) => {
             if (!res.ok) throw new Error();
             return res.json();
@@ -82,7 +57,7 @@ export default function TelemetryDashboard() {
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [autoRefresh]);
+  }, [autoRefresh, token]);
 
   const getStatusColor = (code) => {
     if (code >= 500) return 'text-rose-500 font-bold';

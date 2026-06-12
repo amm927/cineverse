@@ -49,6 +49,7 @@ class Usuario(Base):
     hashed_password = Column(String, nullable=True)
     google_id = Column(String, unique=True, index=True, nullable=True)
     avatar_url = Column(String, nullable=True)
+    role = Column(String, nullable=False, default="user")
     sala_codigo = Column(String, index=True, nullable=True) # Código de sala compartido efímero si aplica
     pareja_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
     tiene_pareja = Column(Boolean, default=False)
@@ -205,3 +206,12 @@ def init_db():
                 connection.exec_driver_sql(
                     f"ALTER TABLE peliculas ADD COLUMN {column_name} {column_type}"
                 )
+
+        user_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(usuarios)").fetchall()
+        }
+        if "role" not in user_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE usuarios ADD COLUMN role VARCHAR NOT NULL DEFAULT 'user'"
+            )

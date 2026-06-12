@@ -19,7 +19,10 @@ from app.database import (
     Usuario, Sala, SalaMiembro, Decision, HistorialMatch, SystemLog, PushSubscription, engine,
     Serie, ComentarioSerie, DecisionSerie, HistorialMatchSerie, Pareja, VistasPareja, VistasUsuario
 )
-from app.auth import get_password_hash, verify_password, create_access_token, get_current_user
+from app.auth import (
+    get_password_hash, verify_password, create_access_token, get_current_user,
+    get_optional_current_user, get_current_admin
+)
 from app.calendar_helper import generate_ics_content, schedule_google_calendar_event
 
 try:
@@ -187,6 +190,29 @@ app.add_middleware(TelemetryMiddleware)
 @app.on_event("startup")
 def startup_event():
     init_db()
+    admin_email = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+    admin_name = os.environ.get("ADMIN_NAME", "Administrador CineVerse").strip()
+    if not admin_email or not admin_password:
+        print("[ADMIN] Credenciales no configuradas; no se crea el usuario administrador.")
+        return
+
+    db = SessionLocal()
+    try:
+        admin = db.query(Usuario).filter(Usuario.email == admin_email).first()
+        if not admin:
+            admin = Usuario(
+                name=admin_name,
+                email=admin_email,
+                hashed_password=get_password_hash(admin_password),
+                role="admin"
+            )
+            db.add(admin)
+        else:
+            admin.role = "admin"
+        db.commit()
+    finally:
+        db.close()
 
 def get_db():
     db = SessionLocal()
@@ -340,8 +366,17 @@ def cache_movie_detail(ttl: int = 3600):
 # Endpoints de Películas (CineVerse Catalog)
 # ---------------------------------------------------------------------------
 @app.get("/api/movies", response_model=List[PeliculaBase])
-def get_movies(refresh: bool = False, db: Session = Depends(get_db)):
+def get_movies(
+    refresh: bool = False,
+    current_user: Optional[Usuario] = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
     if refresh:
+        if not current_user or current_user.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="El scraping manual está reservado a usuarios administradores."
+            )
         print("[API] Solicitud de refresco. Limpiando catálogo de base de datos...")
         db.query(ComentarioScrapeado).delete()
         db.query(Pelicula).delete()
@@ -400,7 +435,16 @@ def _upsert_cinema_movie(db: Session, item: dict, now_playing: bool, upcoming: b
     return movie
 
 @app.get("/api/movies/cinema")
-def get_cinema_catalog(refresh: bool = False, db: Session = Depends(get_db)):
+def get_cinema_catalog(
+    refresh: bool = False,
+    current_user: Optional[Usuario] = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
+    if refresh and (not current_user or current_user.role != "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El scraping manual está reservado a usuarios administradores."
+        )
     cache_key = "cinema:catalog:v1"
     if not refresh:
         try:
@@ -606,8 +650,17 @@ def cache_serie_detail(ttl: int = 3600):
 # Endpoints de Series (CineVerse Catalog)
 # ---------------------------------------------------------------------------
 @app.get("/api/series", response_model=List[SerieBase])
-def get_series(refresh: bool = False, db: Session = Depends(get_db)):
+def get_series(
+    refresh: bool = False,
+    current_user: Optional[Usuario] = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
     if refresh:
+        if not current_user or current_user.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="El scraping manual está reservado a usuarios administradores."
+            )
         print("[API] Solicitud de refresco de series. Limpiando catálogo de base de datos...")
         db.query(ComentarioSerie).delete()
         db.query(Serie).delete()
@@ -800,7 +853,8 @@ def register(req: UserRegisterRequest, db: Session = Depends(get_db)):
             "name": new_user.name,
             "email": new_user.email,
             "avatar_url": new_user.avatar_url,
-            "pareja_id": new_user.pareja_id
+            "pareja_id": new_user.pareja_id,
+            "role": new_user.role
         }
     }
 
@@ -822,7 +876,8 @@ def login(req: UserLoginRequest, db: Session = Depends(get_db)):
             "name": user.name,
             "email": user.email,
             "avatar_url": user.avatar_url,
-            "pareja_id": user.pareja_id
+            "pareja_id": user.pareja_id,
+            "role": user.role
         }
     }
 
@@ -861,7 +916,8 @@ def google_login(req: GoogleLoginRequest, db: Session = Depends(get_db)):
             "name": user.name,
             "email": user.email,
             "avatar_url": user.avatar_url,
-            "pareja_id": user.pareja_id
+            "pareja_id": user.pareja_id,
+            "role": user.role
         }
     }
 
@@ -877,7 +933,8 @@ def get_me(current_user: Usuario = Depends(get_current_user)):
         "email": current_user.email,
         "avatar_url": current_user.avatar_url,
         "pareja_id": current_user.pareja_id,
-        "tiene_pareja": current_user.tiene_pareja
+        "tiene_pareja": current_user.tiene_pareja,
+        "role": current_user.role
     }
 
 @app.put("/api/users/me")
@@ -911,7 +968,8 @@ def update_profile(req: UpdateProfileRequest, current_user: Usuario = Depends(ge
             "name": db_user.name,
             "email": db_user.email,
             "avatar_url": db_user.avatar_url,
-            "pareja_id": db_user.pareja_id
+            "pareja_id": db_user.pareja_id,
+            "role": db_user.role
         }
     }
 
@@ -963,7 +1021,8 @@ async def upload_avatar(
             "name": db_user.name,
             "email": db_user.email,
             "avatar_url": db_user.avatar_url,
-            "pareja_id": db_user.pareja_id
+            "pareja_id": db_user.pareja_id,
+            "role": db_user.role
         }
     }
 
@@ -3125,7 +3184,10 @@ def download_ics(titulo: str, fecha: str):
 # Endpoint Telemetría (SRE)
 # ---------------------------------------------------------------------------
 @app.get("/api/admin/telemetry")
-def get_telemetry(db: Session = Depends(get_db)):
+def get_telemetry(
+    current_user: Usuario = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
     total_requests = db.query(SystemLog).count()
     if total_requests == 0:
         pool = engine.pool

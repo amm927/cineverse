@@ -751,7 +751,12 @@ export default function App() {
 
     const url = forceRefresh ? `${FETCH_URL}?refresh=true` : FETCH_URL;
 
-    fetch(url)
+    const token = localStorage.getItem('cinematch_token');
+    const requestOptions = forceRefresh && token
+      ? { headers: { 'Authorization': `Bearer ${token}` } }
+      : {};
+
+    fetch(url, requestOptions)
       .then((res) => {
         if (!res.ok) {
           throw new Error('No se pudo establecer conexión con el backend de CineVerse');
@@ -930,6 +935,13 @@ export default function App() {
   const activeTheme = getMovieTheme();
   const isAuthenticated = !!user;
   const isPaired = user?.tiene_pareja === true;
+  const isAdmin = user?.role === 'admin';
+
+  useEffect(() => {
+    if (activeTab === 'telemetry' && !isAdmin) {
+      setActiveTab('explorer');
+    }
+  }, [activeTab, isAdmin]);
 
   return (
     <div className="relative min-h-screen bg-slate-950 text-slate-100 font-sans overflow-x-hidden">
@@ -1025,16 +1037,18 @@ export default function App() {
             >
               📺 SeriesMatch
             </button>
-            <button
-              onClick={() => setActiveTab('telemetry')}
-              className={`px-4 py-1.5 rounded-full text-xs font-bold transition duration-200 ${
-                activeTab === 'telemetry'
-                  ? 'bg-gradient-to-r from-indigo-500 to-cyan-500 text-slate-950 shadow-md btn-neon-glow'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              📊 Telemetría
-            </button>
+            {isAdmin && (
+              <button
+                onClick={() => setActiveTab('telemetry')}
+                className={`px-4 py-1.5 rounded-full text-xs font-bold transition duration-200 ${
+                  activeTab === 'telemetry'
+                    ? 'bg-gradient-to-r from-indigo-500 to-cyan-500 text-slate-950 shadow-md btn-neon-glow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                📊 Telemetría
+              </button>
+            )}
           </div>
 
 
@@ -1097,7 +1111,7 @@ export default function App() {
                 </button>
               )}
               
-              {activeTab === 'explorer' && (
+              {activeTab === 'explorer' && isAdmin && (
                 <button
                   onClick={() => fetchMoviesList(true)}
                   disabled={isRefreshing || loadingMovies}
@@ -1182,20 +1196,6 @@ export default function App() {
 
           ) : (
             <div className="flex items-center gap-2 md:gap-4 text-xs">
-              {activeTab === 'explorer' && (
-                <button
-                  onClick={() => fetchMoviesList(true)}
-                  disabled={isRefreshing || loadingMovies}
-                  className="flex items-center justify-center w-8 h-8 shrink-0 md:w-auto md:px-3 md:py-1.5 bg-slate-900 hover:bg-slate-850 disabled:opacity-50 text-cyan-400 font-bold border border-slate-800 rounded-full transition transform hover:scale-105 active:scale-95 duration-200"
-                  title="Actualizar catálogo (Scraper)"
-                >
-                  <svg className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-indigo-400' : 'hover:rotate-180 transition-transform duration-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M9 11l3-3 3 3m-3-3v12" />
-                  </svg>
-                  <span className="hidden md:inline ml-1.5">{isRefreshing ? 'Scrapeando...' : 'Scraper'}</span>
-                </button>
-              )}
-
               <button
                 onClick={() => setActiveTab('cinematch')}
                 className="px-2.5 py-1 md:px-3 md:py-1.5 bg-pink-950/40 border border-pink-900 hover:bg-pink-900/40 text-pink-400 hover:text-pink-300 text-[10px] md:text-xs rounded-full transition font-bold"
@@ -1333,9 +1333,9 @@ export default function App() {
           )}
 
           {/* PESTAÑA 3: OBSERVABILIDAD Y TELEMETRÍA (SRE) */}
-          {activeTab === 'telemetry' && (
+          {activeTab === 'telemetry' && isAdmin && (
             <main className="min-h-[80vh] py-6">
-              <TelemetryDashboard />
+              <TelemetryDashboard token={localStorage.getItem('cinematch_token')} />
             </main>
           )}
 
@@ -1579,15 +1579,17 @@ export default function App() {
           <span className="text-xl">📺</span>
           <span className="text-[10px] tracking-wide">SeriesMatch</span>
         </button>
-        <button
-          onClick={() => setActiveTab('telemetry')}
-          className={`flex flex-col items-center gap-1 py-1 px-2 rounded-xl transition duration-200 ${
-            activeTab === 'telemetry' ? 'text-indigo-400 font-extrabold shadow-[0_0_15px_rgba(99,102,241,0.1)]' : 'text-slate-500 hover:text-slate-350'
-          }`}
-        >
-          <span className="text-xl">📊</span>
-          <span className="text-[10px] tracking-wide">Telemetría</span>
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setActiveTab('telemetry')}
+            className={`flex flex-col items-center gap-1 py-1 px-2 rounded-xl transition duration-200 ${
+              activeTab === 'telemetry' ? 'text-indigo-400 font-extrabold shadow-[0_0_15px_rgba(99,102,241,0.1)]' : 'text-slate-500 hover:text-slate-350'
+            }`}
+          >
+            <span className="text-xl">📊</span>
+            <span className="text-[10px] tracking-wide">Telemetría</span>
+          </button>
+        )}
       </div>
 
       {/* Toast de Notificaciones en Tiempo Real */}
@@ -1621,4 +1623,3 @@ export default function App() {
     </div>
   );
 }
-

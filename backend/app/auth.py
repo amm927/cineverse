@@ -89,3 +89,19 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     print(f"[AUTH_DEBUG] Authenticated user: {user.email}")
     return user
+
+def get_optional_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    if not token:
+        return None
+    return get_current_user(token=token, db=db)
+
+def get_current_admin(current_user: Usuario = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Esta función está reservada a usuarios administradores."
+        )
+    return current_user
