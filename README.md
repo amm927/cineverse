@@ -91,11 +91,17 @@ una instancia local de Redis.
    VAPID_PUBLIC_KEY=tu_clave_publica
    VAPID_PRIVATE_KEY=tu_clave_privada
    VAPID_SUBJECT=mailto:tu-email@example.com
+
+   ADMIN_EMAIL=admin@example.com
+   ADMIN_PASSWORD=una_contraseña_larga_y_aleatoria
+   ADMIN_NAME=Administrador CineVerse
    ```
 
    `TMDB_API_KEY` o `TMDB_READ_ACCESS_TOKEN` son necesarios para cargar el
    catálogo. Google OAuth y VAPID son opcionales si no se usan el acceso con
-   Google ni las notificaciones push.
+   Google ni las notificaciones push. Las variables `ADMIN_EMAIL` y
+   `ADMIN_PASSWORD` habilitan la cuenta con acceso al refresco manual del
+   catálogo y al panel de telemetría.
 
 3. Para desarrollo local, establece la variable del servicio `frontend` en
    `docker-compose.yml`:
